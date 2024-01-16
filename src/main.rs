@@ -7,10 +7,21 @@ use iter::Iterator;
 enum State {
 	Eof,
 	Nl,
+	TabNl,
 	Ok,
 }
 
 fn skip_line(file: &mut io::Bytes<fs::File>) -> io::Result<State> {
+	loop {
+		match file.next() {
+			option::Option::Some(r) => match r? {
+				b'\n' => return result::Result::Ok(State::TabNl),
+				b'\t' | b'\r' => continue,
+				_ => break,
+			},
+			option::Option::None => return result::Result::Ok(State::Eof),
+		}
+	}
 	loop {
 		match file.next() {
 			option::Option::Some(r) => match r? {
@@ -22,12 +33,11 @@ fn skip_line(file: &mut io::Bytes<fs::File>) -> io::Result<State> {
 	}
 }
 
-fn read_word<F>(file: &mut io::Bytes<fs::File>, mut f: F) -> io::Result<State>
-where F: ops::FnMut(u8) {
+fn read_word(file: &mut io::Bytes<fs::File>, v: &mut vec::Vec<u8>) -> io::Result<State> {
 	match file.next() {
 		option::Option::Some(r) => match r? {
 			b'\t' => return skip_line(file),
-			c => f(c),
+			c => v.push(c),
 		},
 		option::Option::None => return result::Result::Ok(State::Eof),
 	}
@@ -35,34 +45,25 @@ where F: ops::FnMut(u8) {
 		match file.next() {
 			option::Option::Some(r) => match r? {
 				b'\t' => return result::Result::Ok(State::Ok),
-				c => f(c),
+				c => v.push(c),
 			},
 			option::Option::None => return result::Result::Ok(State::Eof),
 		}
 	}
 }
 
-fn custom_write(file: &mut fs::File, id: &mut vec::Vec<u8>, emoji: &mut vec::Vec<u8>) -> io::Result<()> {
-	file.write_all(id)?;
-	file.write_all(emoji)?;
-	file.write_all(&[b'\n'])?;
-	emoji.clear();
-	id.clear();
-	return result::Result::Ok(());
-}
-
-fn standard_write(file: &mut fs::File, id: &mut vec::Vec<u8>) -> io::Result<()> {
-	file.write_all(id)?;
-	file.write_all(&[b'\n'])?;
-	id.clear();
-	return result::Result::Ok(());
-}
-
 fn main() -> io::Result<()> {
+	println!("{:?}", env::current_dir()?);
+
 	let mut in_file = fs::File::open("resources/vaidmenys.tsv")?.bytes();
 	let mut out_file = fs::File::create(env::current_exe()?.parent().unwrap().join("out.txt"))?;
+
+	let mut buf_name = vec::Vec::<u8>::with_capacity(100);
 	let mut buf_id = vec::Vec::<u8>::with_capacity(100);
 	let mut buf_emoji = vec::Vec::<u8>::with_capacity(100);
+
+	const EMOJIS: [char; 20] = ['🇦', '🇧', '🇨', '🇩', '🇪', '🇫', '🇬', '🇭', '🇮', '🇯', '🇰', '🇱', '🇲', '🇳', '🇴', '🇵', '🇶', '🇷', '🇸', '🇹'];
+	let mut emojis_iter = EMOJIS.iter();
 
 	match skip_line(&mut in_file)? {
 		State::Eof => return result::Result::Ok(()),
@@ -70,34 +71,53 @@ fn main() -> io::Result<()> {
 	}
 
 	loop {
-		match read_word(&mut in_file, |_| ())? {
+		match read_word(&mut in_file, &mut buf_name)? {
 			State::Eof => break,
-			State::Nl => continue,
-			_ => (),
+			State::TabNl | State::Nl => continue,
+			State::Ok => (),
 		}
-		match read_word(&mut in_file, |c| buf_id.push(c))? {
+		match read_word(&mut in_file, &mut buf_id)? {
 			State::Eof => break,
-			State::Nl => continue,
-			_ => (),
-		}
-		match read_word(&mut in_file, |c| buf_emoji.push(c))? {
-			State::Eof => {
-				standard_write(&mut out_file, &mut buf_id)?;
-				break;
-			},
 			State::Nl => {
-				standard_write(&mut out_file, &mut buf_id)?;
+				buf_name.clear();
 				continue;
 			},
-			_ => match skip_line(&mut in_file)? {
-				State::Eof => {
-					custom_write(&mut out_file, &mut buf_id, &mut buf_emoji)?;
-					break;
-				},
-				_ => {
-					custom_write(&mut out_file, &mut buf_id, &mut buf_emoji)?;
-					continue;
-				},
+			State::TabNl => {
+				writeln!(out_file)?;
+				unsafe { writeln!(out_file, "• {}", str::from_utf8_unchecked(&buf_name))? }
+				buf_name.clear();
+				continue;
+			},
+			State::Ok => buf_name.clear(),
+		}
+		let emoji = *match emojis_iter.next() {
+			option::Option::Some(e) => e,
+			option::Option::None => {
+				writeln!(out_file, "\n\n")?;
+				emojis_iter = EMOJIS.iter();
+				unsafe { emojis_iter.next().unwrap_unchecked() }
+			},
+		};
+		match read_word(&mut in_file, &mut buf_emoji)? {
+			State::Ok => {
+				unsafe { writeln!(out_file, "> {} `-` <@&{}>", str::from_utf8_unchecked(&buf_emoji), str::from_utf8_unchecked(&buf_id))? }
+				buf_emoji.clear();
+				buf_id.clear();
+
+				match skip_line(&mut in_file)? {
+					State::Eof => break,
+					_ => continue,
+				}
+			},
+			state => {
+				unsafe { writeln!(out_file, "> {} `-` <@&{}>", emoji, str::from_utf8_unchecked(&buf_id))? }
+				buf_id.clear();
+
+				match state {
+					State::Eof => break,
+					State::TabNl | State::Nl => continue,
+					State::Ok => unsafe { hint::unreachable_unchecked() },
+				}
 			},
 		}
 	}
